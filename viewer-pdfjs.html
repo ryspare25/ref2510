@@ -33,6 +33,13 @@
   </style>
 </head>
 <body>
+  <!-- Optional inline JSON alternative. If you use pantone-colors.json, you can delete this script tag. -->
+  <!--
+  <script id="pantone-data" type="application/json">
+    { "names":[ "ultimate-gray","illuminating", ... ], "values":[ "#939597","#f5df4d", ... ] }
+  </script>
+  -->
+
   <main class="paper">
     <header class="mb-2 d-flex flex-wrap align-items-center gap-2">
       <h1 class="mb-0">PDF Random Page Viewer</h1>
@@ -120,53 +127,151 @@
     import { getDocument, GlobalWorkerOptions } from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.mjs";
     GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.mjs";
 
-    /* ======= IndexedDB Caching ======= */
-    const DB_NAME = 'pdfCacheDB';
-    const DB_VERSION = 1;
-    const PDF_STORE_NAME = 'pdfs';
+    /* ======= Helpers & DOM ======= */
+    const $ = s => document.querySelector(s);
+    const statusEl = $("#status"), metaEl = $("#meta"), fileEl = $("#file"), countEl = $("#count");
+    const currentEl = $("#currentPage"), rangeView = $("#rangeView"), openAtLink = $("#openAtLink");
+    const useInferredChk = $("#useInferred"), minInput = $("#minPage"), maxInput = $("#maxPage");
+    const rerollBtn = $("#reroll"), prevBtn = $("#prev"), nextBtn = $("#next");
+    const applyRangeBtn = $("#applyRange"), resetToInferredBtn = $("#resetToInferred");
+    const zoomInput = $("#zoom"), applyZoomBtn = $("#applyZoom");
+    const canvas = $("#pdfCanvas"), ctx = canvas.getContext("2d");
+    const bgTag = $("#bgTag");
+    const randomFileBtn = $("#randomFileBtn"), copyTextBtn = $("#copyTextBtn");
 
-    // Open IndexedDB database
-    function openDatabase() {
-      return new Promise((resolve, reject) => {
-        const request = indexedDB.open(DB_NAME, DB_VERSION);
-        request.onerror = () => reject('Error opening IndexedDB');
-        request.onsuccess = () => resolve(request.result);
-        request.onupgradeneeded = (event) => {
-          const db = event.target.result;
-          if (!db.objectStoreNames.contains(PDF_STORE_NAME)) {
-            db.createObjectStore(PDF_STORE_NAME, { keyPath: 'filename' });
-          }
-        };
-      });
+    // Auto-cycle UI
+    const autoCycleToggle = $("#autoCycleToggle");
+    const autoCycleSecs = $("#autoCycleSecs");
+    const applyAutoCycle = $("#applyAutoCycle");
+    const autoCycleStatus = $("#autoCycleStatus");
+    let autoTimer = null;
+
+    const params = new URLSearchParams(location.search);
+    let rawFile = params.get("fileName");
+
+    function sanitizePdfName(name) {
+      if (!name) return null;
+      const s = decodeURIComponent(name).trim();
+      if (/[\\\/]/.test(s) || /[\x00-\x1F]/.test(s)) return null;
+      if (!/^[A-Za-z0-9._-]+$/i.test(s)) return null;
+      if (!/\.pdf$/i.test(s)) return null;
+      return s;
+    }
+    function fail(msg){ statusEl.className="err"; statusEl.textContent=msg; }
+    function ok(msg){ statusEl.className="ok"; statusEl.textContent=msg; }
+    function randomInt(lo, hi){
+      if (hi < lo) [lo, hi] = [hi, lo];
+      const span = hi - lo + 1, buf = new Uint32Array(1);
+      let x; do { crypto.getRandomValues(buf); x = buf[0] / 2 ** 32; } while (x === 1);
+      return lo + Math.floor(x * span);
     }
 
-    // Save PDF file to IndexedDB
-    function savePdfToIndexedDB(db, filename, pdfData) {
-      return new Promise((resolve, reject) => {
-        const transaction = db.transaction([PDF_STORE_NAME], 'readwrite');
-        const store = transaction.objectStore(PDF_STORE_NAME);
-        const pdfRecord = { filename, pdfData };
-        const request = store.put(pdfRecord);
-        request.onsuccess = () => resolve();
-        request.onerror = () => reject('Error saving PDF to IndexedDB');
-      });
+    /* ======= Pantone loader (uses your giant list) ======= */
+    let PANTONE = [
+      // Fallback mini set (used only if inline JSON or pantone-colors.json not found)
+      { name: "ultimate-gray", hex: "#939597" },
+      { name: "illuminating", hex: "#f5df4d" },
+      { name: "very-peri", hex: "#6667ab" },
+      { name: "viva-magenta", hex: "#bb2649" },
+      { name: "tranquil-blue", hex: "#acd8e6" },
+      { name: "verdigris", hex: "#43b5b0" },
+      { name: "egret", hex: "#f3ece0" },
+      { name: "bright-white", hex: "#f4f5f0" },
+      { name: "classic-blue", hex: "#0f4c81" }
+    ];
+
+    async function hydratePantone() {
+      // 1) Inline JSON?
+      const inline = document.getElementById("pantone-data");
+      if (inline?.textContent?.trim()) {
+        try {
+          const obj = JSON.parse(inline.textContent);
+          if (Array.isArray(obj.names) && Array.isArray(obj.values) && obj.names.length === obj.values.length) {
+            PANTONE = obj.names.map((n, i) => ({ name: n, hex: obj.values[i] }));
+            return;
+          }
+        } catch {}
+      }
+      // 2) External JSON file
+      try {
+        const res = await fetch("./pantone-colors.json", { cache: "no-store" });
+        if (res.ok) {
+          const obj = await res.json();
+          if (Array.isArray(obj.names) && Array.isArray(obj.values) && obj.names.length === obj.values.length) {
+            PANTONE = obj.names.map((n, i) => ({ name: n, hex: obj.values[i] }));
+          }
+        }
+      } catch {}
     }
 
-    // Get PDF file from IndexedDB
-    function getPdfFromIndexedDB(db, filename) {
-      return new Promise((resolve, reject) => {
-        const transaction = db.transaction([PDF_STORE_NAME], 'readonly');
-        const store = transaction.objectStore(PDF_STORE_NAME);
-        const request = store.get(filename);
-        request.onsuccess = () => {
-          if (request.result) {
-            resolve(request.result.pdfData);
-          } else {
-            resolve(null);
-          }
-        };
-        request.onerror = () => reject('Error retrieving PDF from IndexedDB');
-      });
+    function setRandomPantoneBackground() {
+      const { name, hex } = PANTONE[randomInt(0, PANTONE.length - 1)];
+      document.body.style.background = `
+        radial-gradient(1200px 800px at 50% -10%, rgba(255,255,255,.35), rgba(255,255,255,0) 70%),
+        ${hex}
+      `;
+      bgTag.textContent = `Background: ${name}`;
+    }
+
+    /* ======= PDF bits (your logic preserved; min=1 enforced) ======= */
+    function inferMainRangeFromLabels(labels, total) {
+      if (!Array.isArray(labels) || labels.length !== total) return null;
+      const parseArabic = lab => {
+        const m = String(lab ?? "").match(/(^|[^0-9])([0-9]+)($|[^0-9])/);
+        return m ? Number(m[2]) : null;
+      };
+      let startIdx = -1;
+      for (let i=0;i<total;i++){ if (parseArabic(labels[i]) === 1){ startIdx=i; break; } }
+      if (startIdx === -1) return null;
+      let expected=1, endIdx=startIdx;
+      for (let i=startIdx;i<total;i++){
+        const n = parseArabic(labels[i]);
+        if (n === expected){ endIdx=i; expected++; } else break;
+      }
+      return { min:startIdx+1, max:endIdx+1 };
+    }
+
+    let pdf=null, total=0, current=1, zoom=1.0, inferred=null;
+    let fileName = sanitizePdfName(rawFile);
+    if (!fileName){ fail("** Missing or invalid ?fileName param. Example: ?fileName=1.pdf **"); throw new Error("Invalid fileName"); }
+    let pdfUrl = new URL("./" + fileName, location.href).toString();
+
+    function setRangeInputs(min, max){
+      min = 1; // enforce
+      minInput.value = "1";
+      maxInput.value = String(max);
+      rangeView.textContent = `1–${max}`;
+    }
+    function getActiveRange(){
+      const def = inferred ?? { min:1, max: total||1 };
+      let max = Number(maxInput.value || def.max);
+      if (!Number.isFinite(max) || max < 1) max = 1;
+      if (total && max > total) max = total;
+      return { min:1, max };
+    }
+
+    async function renderPage(pageNumber){
+      if (!pdf) return;
+      pageNumber = Math.max(1, Math.min(total, pageNumber));
+      current = pageNumber;
+      const page = await pdf.getPage(pageNumber);
+
+      const baseVp = page.getViewport({ scale: 1 });
+      const containerWidth = document.getElementById("canvasWrap").clientWidth;
+      const fitScale = containerWidth / baseVp.width;
+      const finalScale = fitScale * zoom;
+
+      const vp = page.getViewport({ scale: finalScale });
+      canvas.width = Math.floor(vp.width);
+      canvas.height = Math.floor(vp.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+      currentEl.textContent = String(current);
+      openAtLink.href = `${pdfUrl}#page=${current}`;
+      const u = new URL(location.href);
+      u.searchParams.set("page", String(current));
+      u.searchParams.set("fileName", fileName);
+      history.replaceState({}, "", u.toString());
     }
 
     async function loadPdfByFileName(newFileName){
@@ -175,22 +280,11 @@
       fileName = safe;
       pdfUrl = new URL("./" + fileName, location.href).toString();
 
-      statusEl.textContent = "Checking cache for " + fileName + "…";
-      const db = await openDatabase();
-      const cachedPdf = await getPdfFromIndexedDB(db, fileName);
-
-      if (cachedPdf) {
-        statusEl.textContent = "Loaded PDF from cache.";
-        pdf = await getDocument({ data: cachedPdf }).promise;
-      } else {
-        statusEl.textContent = "Fetching " + fileName + " from network…";
-        const task = getDocument({ url: pdfUrl });
-        pdf = await task.promise;
-        const pdfData = await task.promise;
-        savePdfToIndexedDB(db, fileName, pdfData);
-      }
-
+      statusEl.textContent = "Fetching " + fileName + "…";
+      const task = getDocument({ url: pdfUrl });
+      pdf = await task.promise;
       total = pdf.numPages;
+
       let labels = null;
       try { labels = await pdf.getPageLabels(); } catch {}
       const guessed = inferMainRangeFromLabels(labels, total) ?? { min:1, max: total };
@@ -255,6 +349,77 @@
       const z = Number(zoomInput.value);
       if (Number.isFinite(z) && z >= 0.2 && z <= 3) { zoom = z; await renderPage(current); }
     });
+
+    addEventListener("resize", (() => {
+      let t; return () => { clearTimeout(t); t=setTimeout(() => { if (pdf) renderPage(current); }, 150); };
+    })());
+
+    // Random file (1..N).pdf
+    function parseNumericStem(name){ const m = /^(\d+)\.pdf$/i.exec(name); return m ? Number(m[1]) : null; }
+    randomFileBtn.addEventListener("click", async () => {
+      try {
+        const n = parseNumericStem(fileName);
+        if (!n || n < 1) { alert("Current file name is not like N.pdf, so range 1..N is unknown."); return; }
+        const pick = randomInt(1, n);
+        await loadPdfByFileName(`${pick}.pdf`);
+        setRandomPantoneBackground();
+      } catch (e) { console.error(e); fail("Couldn’t load the new random file."); }
+    });
+
+    // Copy text of current page
+    async function extractCurrentPageText(){
+      if (!pdf) throw new Error("PDF not loaded");
+      const page = await pdf.getPage(current);
+      const txt = await page.getTextContent();
+      const strings = txt.items?.map(i => ("str" in i ? i.str : "")) || [];
+      return strings.join(" ").replace(/\s+/g, " ").trim();
+    }
+    copyTextBtn.addEventListener("click", async () => {
+      const original = copyTextBtn.innerHTML;
+      try {
+        const text = await extractCurrentPageText();
+        await navigator.clipboard.writeText(text);
+        copyTextBtn.classList.replace("btn-success","btn-outline-success");
+        copyTextBtn.innerHTML = "✅ Copied!";
+        setTimeout(()=>{ copyTextBtn.classList.replace("btn-outline-success","btn-success"); copyTextBtn.innerHTML = original; }, 1500);
+      } catch (e) {
+        console.error(e);
+        copyTextBtn.classList.replace("btn-success","btn-outline-danger");
+        copyTextBtn.innerHTML = "⚠️ Copy failed";
+        setTimeout(()=>{ copyTextBtn.classList.replace("btn-outline-danger","btn-success"); copyTextBtn.innerHTML = original; }, 2000);
+      }
+    });
+
+    /* ======= Auto-cycle (OFF by default) ======= */
+    function stopAutoCycle(){
+      if (autoTimer){ clearInterval(autoTimer); autoTimer = null; }
+      autoCycleToggle.checked = false;
+      autoCycleStatus.textContent = "Off";
+    }
+    function startAutoCycle(secs){
+      stopAutoCycle();
+      autoCycleToggle.checked = true;
+      autoCycleStatus.textContent = `On (${secs}s)`;
+      autoTimer = setInterval(async () => {
+        const { min, max } = getActiveRange();
+        setRandomPantoneBackground();
+        await renderPage(randomInt(min, max));
+      }, Math.max(2, secs) * 1000);
+    }
+
+    applyAutoCycle.addEventListener("click", () => {
+      const secs = Math.floor(Number(autoCycleSecs.value) || 10);
+      if (autoCycleToggle.checked) startAutoCycle(secs); else stopAutoCycle();
+    });
+    autoCycleToggle.addEventListener("change", () => {
+      const secs = Math.floor(Number(autoCycleSecs.value) || 10);
+      if (autoCycleToggle.checked) startAutoCycle(secs); else stopAutoCycle();
+    });
+    addEventListener("visibilitychange", () => {
+      // Pause when tab hidden; resume when visible (keeps user CPU happy)
+      if (document.hidden) stopAutoCycle();
+    });
+    addEventListener("beforeunload", stopAutoCycle);
   </script>
 </body>
 </html>
