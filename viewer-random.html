@@ -2,64 +2,126 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>PDF Random Page Viewer (Auto-Range)</title>
+  <title>PDF Random Page Viewer (Auto-Range, Styled)</title>
   <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <!-- Bootstrap CSS -->
+  <link
+    href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css"
+    rel="stylesheet"
+    integrity="sha384-QWTKZyjpPEjISv5WaRU9OFeRpok6YctnYmDr5pNlyT2bRjXh0JMhjY6hW+ALEwIH"
+    crossorigin="anonymous"
+  >
   <style>
-    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, sans-serif; }
-    body { margin: 1.5rem; }
-    .ok { color: #0a0; }
-    .err { color: #b00; }
-    code { background: #f6f8fa; padding: .1rem .3rem; border-radius: .25rem; }
-    .row { display: flex; flex-wrap: wrap; gap: .5rem; align-items: center; }
-    .controls { display: flex; gap: .5rem; align-items: center; margin: .75rem 0 1rem; flex-wrap: wrap; }
-    button { padding: .5rem .8rem; border: 1px solid #ccc; border-radius: .5rem; background: #fff; cursor: pointer; }
-    button:disabled { opacity: .6; cursor: not-allowed; }
-    #canvasWrap { width: min(100%, 900px); }
-    #pdfCanvas { width: 100%; height: auto; display: block; background: #fff; box-shadow: 0 0 0 1px #eee, 0 2px 8px rgba(0,0,0,.05); }
-    label { font-size: .9rem; opacity: .9; }
-    input[type="number"] { width: 6rem; padding: .35rem .45rem; }
+    :root {
+      --paper-bg: #fff;
+      --paper-shadow: 0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.08);
+    }
+    /* Center everything */
+    body {
+      min-height: 100svh;
+      display: grid;
+      place-items: center;
+      background: #f2f2f2; /* will be replaced by Pantone on load/reroll */
+      transition: background-color .6s ease, background .6s ease;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    /* Paper-like container */
+    .paper {
+      width: min(100%, 980px);
+      background:
+        radial-gradient(1200px 800px at 50% 20%, rgba(255,255,255,.75), rgba(255,255,255,.9)),
+        repeating-linear-gradient(0deg, rgba(0,0,0,.015) 0px, rgba(0,0,0,.015) 1px, transparent 1px, transparent 6px),
+        var(--paper-bg);
+      border-radius: 18px;
+      box-shadow: var(--paper-shadow);
+      padding: 2rem;
+      border: 1px solid rgba(0,0,0,.05);
+      backdrop-filter: blur(1px);
+    }
+    h1 {
+      font-weight: 700;
+      letter-spacing: .2px;
+      margin-bottom: .5rem;
+    }
     .muted { opacity: .75; }
-    .tag { font-size: .8rem; padding: .15rem .4rem; border: 1px solid #ddd; border-radius: .4rem; }
+    .tag {
+      font-size: .8rem; padding: .15rem .5rem;
+      border: 1px solid #e5e7eb; border-radius: .4rem; background: #fff;
+    }
+    #canvasWrap { width: 100%; }
+    #pdfCanvas {
+      width: 100%; height: auto; display: block; background: #fff;
+      box-shadow: 0 0 0 1px #eee, 0 2px 8px rgba(0,0,0,.05);
+      border-radius: 8px;
+    }
+    #status.err { color: #b02a37; }
+    #status.ok  { color: #0a7a2e; }
+    .control-row { gap: .5rem; }
+    .form-control-sm { min-width: 6rem; }
   </style>
 </head>
 <body>
-  <h1>PDF Random Page Viewer (Auto-Range)</h1>
-  <p>Use <code>?fileName=1.pdf</code>. The viewer **_infers a main page range_** from PDF page labels and initializes on a **_random page_** within that range.</p>
+  <main class="paper">
+    <header class="mb-2 d-flex flex-wrap align-items-center gap-2">
+      <h1 class="mb-0">PDF Random Page Viewer</h1>
+      <span class="badge bg-secondary-subtle text-secondary-emphasis">Auto-Range</span>
+      <span id="bgTag" class="tag ms-auto">Background: —</span>
+    </header>
+    <p class="text-secondary">Use <code>?fileName=1.pdf</code>. The viewer **infers a main page range** from labels and initializes on a **random page** in that range.</p>
 
-  <div id="status">Loading…</div>
+    <div id="status" class="mb-2">Loading…</div>
 
-  <div id="meta" hidden>
-    <p class="row">
-      <strong>File:</strong>&nbsp;<span id="file"></span>
-      <span class="muted">|</span>
-      <strong>Pages:</strong>&nbsp;<span id="count"></span>
-      <span class="muted">|</span>
-      <span class="tag">Range <span id="rangeView"></span></span>
-      <span class="muted">|</span>
-      <a id="openAtLink" target="_blank" rel="noopener">Open in browser at this page</a>
-    </p>
+    <section id="meta" hidden>
+      <p class="d-flex flex-wrap align-items-center gap-2">
+        <strong>File:</strong><span id="file"></span>
+        <span class="muted">|</span>
+        <strong>Pages:</strong><span id="count"></span>
+        <span class="muted">|</span>
+        <span class="tag">Range <span id="rangeView"></span></span>
+        <span class="muted">|</span>
+        <a id="openAtLink" target="_blank" rel="noopener" class="link-primary">Open in browser at this page</a>
+      </p>
 
-    <div class="controls">
-      <label><input id="useInferred" type="checkbox" checked /> Use inferred main range</label>
-      <label>Min:&nbsp;<input id="minPage" type="number" min="1" step="1" /></label>
-      <label>Max:&nbsp;<input id="maxPage" type="number" min="1" step="1" /></label>
-      <button id="applyRange">Apply range</button>
-      <button id="resetToInferred" title="Reset inputs to inferred range">Reset to inferred</button>
-      <button id="reroll">Reroll random page</button>
-      <button id="prev">Prev</button>
-      <button id="next">Next</button>
-      <label>Zoom:&nbsp;<input id="zoom" type="number" step="0.1" min="0.2" max="3" value="1.0" /></label>
-      <button id="applyZoom">Apply zoom</button>
-      <span class="muted">Current:&nbsp;<strong>#<span id="currentPage">—</span></strong></span>
+      <div class="control-row d-flex flex-wrap align-items-center mb-3">
+        <div class="form-check me-2">
+          <input class="form-check-input" type="checkbox" id="useInferred" checked>
+          <label class="form-check-label" for="useInferred">Use inferred main range</label>
+        </div>
+
+        <div class="input-group input-group-sm me-2" style="width: 10.5rem;">
+          <span class="input-group-text">Min</span>
+          <input id="minPage" type="number" min="1" step="1" class="form-control form-control-sm" />
+        </div>
+        <div class="input-group input-group-sm me-2" style="width: 10.5rem;">
+          <span class="input-group-text">Max</span>
+          <input id="maxPage" type="number" min="1" step="1" class="form-control form-control-sm" />
+        </div>
+
+        <button id="applyRange" class="btn btn-outline-primary btn-sm">Apply range</button>
+        <button id="resetToInferred" class="btn btn-outline-secondary btn-sm" title="Reset inputs to inferred range">Reset</button>
+        <button id="reroll" class="btn btn-primary btn-sm ms-1">Reroll random page</button>
+        <button id="prev" class="btn btn-outline-dark btn-sm ms-1">Prev</button>
+        <button id="next" class="btn btn-outline-dark btn-sm">Next</button>
+
+        <div class="input-group input-group-sm ms-auto" style="width: 12rem;">
+          <span class="input-group-text">Zoom</span>
+          <input id="zoom" type="number" step="0.1" min="0.2" max="3" value="1.0" class="form-control form-control-sm" />
+          <button id="applyZoom" class="btn btn-outline-dark btn-sm">Apply</button>
+        </div>
+
+        <span class="ms-2 text-secondary">Current: <strong>#<span id="currentPage">—</span></strong></span>
+      </div>
+    </section>
+
+    <div id="canvasWrap">
+      <canvas id="pdfCanvas"></canvas>
     </div>
-  </div>
-
-  <div id="canvasWrap">
-    <canvas id="pdfCanvas"></canvas>
-  </div>
+  </main>
 
   <script type="module">
-    // PDF.js ESM (pin a version)
+    /* ========= KEEPING YOUR EXISTING LOGIC, JUST STYLES + BG COLOR HOOKS ========= */
+
+    // PDF.js (ESM) via CDN — pinned
     import { getDocument, GlobalWorkerOptions } from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.mjs";
     GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.mjs";
 
@@ -83,12 +145,12 @@
     const applyZoomBtn = $("#applyZoom");
     const canvas = $("#pdfCanvas");
     const ctx = canvas.getContext("2d");
+    const bgTag = $("#bgTag");
 
-    // --- URL params ---
+    // --- URL params (unchanged) ---
     const params = new URLSearchParams(location.search);
     const rawFile = params.get("fileName");
 
-    // Simple filename sanitizer
     function sanitizePdfName(name) {
       if (!name) return null;
       const s = decodeURIComponent(name).trim();
@@ -118,34 +180,25 @@
       return lo + Math.floor(x * span);
     }
 
-    // Detect the "main" Arabic-numbered run (1..K) from page labels
+    // Infer Arabic-labeled continuous run 1..K
     function inferMainRangeFromLabels(labels, total) {
       if (!Array.isArray(labels) || labels.length !== total) return null;
-
-      // Helper: parse Arabic integer label or return null (ignore prefixes like "A-12")
       const parseArabic = (lab) => {
         const m = String(lab ?? "").match(/(^|[^0-9])([0-9]+)($|[^0-9])/);
         if (!m) return null;
         return Number(m[2]);
       };
-
-      // Find first page whose parsed Arabic == 1
       let startIdx = -1;
       for (let i = 0; i < total; i++) {
         const n = parseArabic(labels[i]);
         if (n === 1) { startIdx = i; break; }
       }
       if (startIdx === -1) return null;
-
-      // Extend while labels increase by +1 contiguously
-      let expected = 1;
-      let endIdx = startIdx;
+      let expected = 1, endIdx = startIdx;
       for (let i = startIdx; i < total; i++) {
         const n = parseArabic(labels[i]);
-        if (n === expected) { endIdx = i; expected++; }
-        else break;
+        if (n === expected) { endIdx = i; expected++; } else break;
       }
-      // Return 1-based page numbers
       return { min: startIdx + 1, max: endIdx + 1 };
     }
 
@@ -198,14 +251,40 @@
       })());
     }
 
+    // ========= New: Random Pantone-ish background =========
+    const PANTONE = [
+      { name: "Pantone 290 C", hex: "#B9D9EB" },
+      { name: "Pantone 2706 C", hex: "#BEC3FF" },
+      { name: "Pantone 698 C",  hex: "#F4C3C2" },
+      { name: "Pantone 7401 C", hex: "#F4E6B3" },
+      { name: "Pantone 2260 C", hex: "#6DC5A4" },
+      { name: "Pantone 7458 C", hex: "#7FB0C9" },
+      { name: "Pantone 7604 C", hex: "#E3D9D6" },
+      { name: "Pantone 1585 C", hex: "#FF7F32" },
+      { name: "Pantone 7671 C", hex: "#7F6DAA" },
+      { name: "Pantone 1205 C", hex: "#F6E39E" },
+      { name: "Pantone 3242 C", hex: "#8CE3D6" },
+      { name: "Pantone 5523 C", hex: "#BFD4CF" }
+    ];
+    function setRandomPantoneBackground() {
+      const { name, hex } = PANTONE[randomInt(0, PANTONE.length - 1)];
+      // Soft radial wash to mimic paper on color
+      document.body.style.background = `
+        radial-gradient(1200px 800px at 50% -10%, rgba(255,255,255,.35), rgba(255,255,255,0) 70%),
+        ${hex}
+      `;
+      bgTag.textContent = `Background: ${name}`;
+    }
+    // ======================================================
+
     (async () => {
       try {
+        setRandomPantoneBackground(); // on pageload
         statusEl.textContent = "Fetching " + fileName + "…";
         const task = getDocument({ url: pdfUrl });
         pdf = await task.promise;
         total = pdf.numPages;
 
-        // Try to infer range from page labels
         let labels = null;
         try { labels = await pdf.getPageLabels(); } catch {}
         inferred = inferMainRangeFromLabels(labels, total) ?? { min: 1, max: total };
@@ -228,15 +307,16 @@
       }
     })();
 
-    // Controls
-    $("#reroll").addEventListener("click", async () => {
+    // Controls (unchanged functionality)
+    rerollBtn.addEventListener("click", async () => {
+      setRandomPantoneBackground(); // change background on reroll
       const { min, max } = getActiveRange();
       await renderPage(randomInt(min, max));
     });
-    $("#prev").addEventListener("click", async () => { await renderPage(current - 1); });
-    $("#next").addEventListener("click", async () => { await renderPage(current + 1); });
+    prevBtn.addEventListener("click", async () => { await renderPage(current - 1); });
+    nextBtn.addEventListener("click", async () => { await renderPage(current + 1); });
 
-    $("#applyRange").addEventListener("click", async () => {
+    applyRangeBtn.addEventListener("click", async () => {
       useInferredChk.checked = false;
       const { min, max } = getActiveRange();
       setRangeInputs(min, max);
@@ -247,7 +327,7 @@
       await renderPage(randomInt(min, max));
     });
 
-    $("#resetToInferred").addEventListener("click", async () => {
+    resetToInferredBtn.addEventListener("click", async () => {
       useInferredChk.checked = true;
       setRangeInputs(inferred.min, inferred.max);
       const u = new URL(location.href);
@@ -257,7 +337,7 @@
       await renderPage(randomInt(inferred.min, inferred.max));
     });
 
-    $("#applyZoom").addEventListener("click", async () => {
+    applyZoomBtn.addEventListener("click", async () => {
       const z = Number(zoomInput.value);
       if (Number.isFinite(z) && z >= 0.2 && z <= 3) {
         zoom = z;
