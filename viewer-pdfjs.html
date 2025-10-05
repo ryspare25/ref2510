@@ -59,6 +59,8 @@
           <input class="form-check-input" type="checkbox" id="useInferred" checked>
           <label class="form-check-label" for="useInferred">Use inferred main range</label>
         </div>
+
+        <!-- Min locked to 1 -->
         <div class="input-group input-group-sm me-2" style="width:10.5rem;">
           <span class="input-group-text">Min</span>
           <input id="minPage" class="form-control form-control-sm" value="1" disabled />
@@ -118,60 +120,141 @@
     import { getDocument, GlobalWorkerOptions } from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.mjs";
     GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.mjs";
 
-    /* ======= IndexedDB PDF Caching ======= */
-    function openPdfCache(){
-      return new Promise((res, rej) => {
-        const request = indexedDB.open('pdfCache', 1);
-        request.onupgradeneeded = (e) => {
-          const db = e.target.result;
-          if (!db.objectStoreNames.contains('files')) {
-            const store = db.createObjectStore('files');
+    /* ======= IndexedDB Caching ======= */
+    const DB_NAME = 'pdfCacheDB';
+    const DB_VERSION = 1;
+    const PDF_STORE_NAME = 'pdfs';
+
+    // Open IndexedDB database
+    function openDatabase() {
+      return new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, DB_VERSION);
+        request.onerror = () => reject('Error opening IndexedDB');
+        request.onsuccess = () => resolve(request.result);
+        request.onupgradeneeded = (event) => {
+          const db = event.target.result;
+          if (!db.objectStoreNames.contains(PDF_STORE_NAME)) {
+            db.createObjectStore(PDF_STORE_NAME, { keyPath: 'filename' });
           }
         };
-        request.onsuccess = (e) => res(e.target.result);
-        request.onerror = (e) => rej(e.target.error);
       });
     }
 
-    async function getPdf(file) {
-      const db = await openPdfCache();
-      return new Promise((res, rej) => {
-        const tx = db.transaction('files', 'readonly');
-        const req = tx.objectStore('files').get(file);
-        req.onsuccess = (e) => res(e.target.result || null);
-        req.onerror = (e) => rej(e.target.error);
+    // Save PDF file to IndexedDB
+    function savePdfToIndexedDB(db, filename, pdfData) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction([PDF_STORE_NAME], 'readwrite');
+        const store = transaction.objectStore(PDF_STORE_NAME);
+        const pdfRecord = { filename, pdfData };
+        const request = store.put(pdfRecord);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject('Error saving PDF to IndexedDB');
       });
     }
 
-    async function putPdf(file, blob) {
-      const db = await openPdfCache();
-      return new Promise((res, rej) => {
-        const tx = db.transaction('files', 'readwrite');
-        tx.objectStore('files').put(blob, file);
-        tx.oncomplete = () => res();
-        tx.onerror = (e) => rej(e.target.error);
+    // Get PDF file from IndexedDB
+    function getPdfFromIndexedDB(db, filename) {
+      return new Promise((resolve, reject) => {
+        const transaction = db.transaction([PDF_STORE_NAME], 'readonly');
+        const store = transaction.objectStore(PDF_STORE_NAME);
+        const request = store.get(filename);
+        request.onsuccess = () => {
+          if (request.result) {
+            resolve(request.result.pdfData);
+          } else {
+            resolve(null);
+          }
+        };
+        request.onerror = () => reject('Error retrieving PDF from IndexedDB');
       });
     }
 
-    async function pdfUrl(file) {
-      let blob = await getPdf(file);
-      if (!blob) {
-        blob = await (await fetch(file)).blob();
-        await putPdf(file, blob);
+    async function loadPdfByFileName(newFileName){
+      const safe = sanitizePdfName(newFileName);
+      if (!safe) throw new Error("Invalid filename");
+      fileName = safe;
+      pdfUrl = new URL("./" + fileName, location.href).toString();
+
+      statusEl.textContent = "Checking cache for " + fileName + "…";
+      const db = await openDatabase();
+      const cachedPdf = await getPdfFromIndexedDB(db, fileName);
+
+      if (cachedPdf) {
+        statusEl.textContent = "Loaded PDF from cache.";
+        pdf = await getDocument({ data: cachedPdf }).promise;
+      } else {
+        statusEl.textContent = "Fetching " + fileName + " from network…";
+        const task = getDocument({ url: pdfUrl });
+        pdf = await task.promise;
+        const pdfData = await task.promise;
+        savePdfToIndexedDB(db, fileName, pdfData);
       }
-      return URL.createObjectURL(blob);
+
+      total = pdf.numPages;
+      let labels = null;
+      try { labels = await pdf.getPageLabels(); } catch {}
+      const guessed = inferMainRangeFromLabels(labels, total) ?? { min:1, max: total };
+      inferred = { min:1, max: guessed.max }; // enforce min=1
+
+      fileEl.textContent = fileName;
+      countEl.textContent = String(total);
+      setRangeInputs(inferred.min, inferred.max);
+      metaEl.hidden = false;
+
+      ok("Loaded successfully.");
+      const start = randomInt(inferred.min, inferred.max);
+      await renderPage(start);
+
+      const u = new URL(location.href);
+      u.searchParams.set("fileName", fileName);
+      history.replaceState({}, "", u.toString());
     }
 
-    /* ======= Load PDF By File Name ======= */
-    let pdf = null, total = 0, current = 1, zoom = 1.0, inferred = null;
-    let fileName = sanitizePdfName(rawFile);
-    if (!fileName) {
-      fail("** Missing or invalid ?fileName param. Example: ?fileName=1.pdf **");
-      throw new Error("Invalid fileName");
-    }
-    let pdfUrl = await pdfUrl(fileName); // Use the caching mechanism
+    /* ======= Boot ======= */
+    (async () => {
+      await hydratePantone();
+      setRandomPantoneBackground(); // on load
+      try { await loadPdfByFileName(fileName); }
+      catch (err) {
+        console.error(err);
+        fail(String(err?.message || "Error loading PDF"));
+      }
+    })();
 
-    // Rendering and control logic remain the same...
+    /* ======= Controls ======= */
+    $("#reroll").addEventListener("click", async () => {
+      setRandomPantoneBackground();
+      const { min, max } = getActiveRange();
+      await renderPage(randomInt(min, max));
+    });
+    $("#prev").addEventListener("click", async () => { await renderPage(current - 1); });
+    $("#next").addEventListener("click", async () => { await renderPage(current + 1); });
+
+    $("#applyRange").addEventListener("click", async () => {
+      useInferredChk.checked = false;
+      const { min, max } = getActiveRange(); // min always 1
+      setRangeInputs(min, max);
+      const u = new URL(location.href);
+      u.searchParams.set("minPage", "1");
+      u.searchParams.set("maxPage", String(max));
+      history.replaceState({}, "", u.toString());
+      await renderPage(randomInt(min, max));
+    });
+
+    $("#resetToInferred").addEventListener("click", async () => {
+      useInferredChk.checked = true;
+      setRangeInputs(inferred.min, inferred.max);
+      const u = new URL(location.href);
+      u.searchParams.delete("minPage");
+      u.searchParams.delete("maxPage");
+      history.replaceState({}, "", u.toString());
+      await renderPage(randomInt(inferred.min, inferred.max));
+    });
+
+    $("#applyZoom").addEventListener("click", async () => {
+      const z = Number(zoomInput.value);
+      if (Number.isFinite(z) && z >= 0.2 && z <= 3) { zoom = z; await renderPage(current); }
+    });
   </script>
 </body>
 </html>
