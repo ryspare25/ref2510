@@ -1,0 +1,328 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PDF Random Page Viewer (Auto-Range, Styled + Autocycle)</title>
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.3/dist/css/bootstrap.min.css" rel="stylesheet">
+  <style>
+    :root { --paper-bg:#fff; --paper-shadow:0 1px 2px rgba(0,0,0,.06), 0 8px 24px rgba(0,0,0,.08); }
+    body {
+      min-height: 100svh; display: grid; place-items: center;
+      background:#f2f2f2; transition: background .6s ease;
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, sans-serif;
+    }
+    .paper {
+      width:min(100%, 980px);
+      background:
+        radial-gradient(1200px 800px at 50% 20%, rgba(255,255,255,.75), rgba(255,255,255,.9)),
+        repeating-linear-gradient(0deg, rgba(0,0,0,.015) 0px, rgba(0,0,0,.015) 1px, transparent 1px, transparent 6px),
+        var(--paper-bg);
+      border-radius: 18px; box-shadow: var(--paper-shadow);
+      padding: 2rem; border: 1px solid rgba(0,0,0,.05); backdrop-filter: blur(1px);
+    }
+    h1 { font-weight:700; margin-bottom:.5rem; }
+    .muted { opacity:.75; }
+    .tag { font-size:.8rem; padding:.15rem .5rem; border:1px solid #e5e7eb; border-radius:.4rem; background:#fff; }
+    #pdfCanvas { width:100%; height:auto; display:block; background:#fff; border-radius:8px;
+      box-shadow:0 0 0 1px #eee, 0 2px 8px rgba(0,0,0,.05); }
+    #status.err{color:#b02a37} #status.ok{color:#0a7a2e}
+    .control-row { gap:.5rem; }
+    .form-control-sm { min-width:6rem; }
+    .btn-icon { display:inline-flex; align-items:center; gap:.4rem; }
+  </style>
+</head>
+<body>
+  <main class="paper">
+    <header class="mb-2 d-flex flex-wrap align-items-center gap-2">
+      <h1 class="mb-0">PDF Random Page Viewer</h1>
+      <span class="badge bg-secondary-subtle text-secondary-emphasis">Auto-Range</span>
+      <span id="bgTag" class="tag ms-auto">Background: —</span>
+    </header>
+    <p class="text-secondary">Use <code>?fileName=1.pdf</code>. The viewer infers a main page range and initializes on a random page in that range.</p>
+
+    <div id="status" class="mb-2">Loading…</div>
+
+    <section id="meta" hidden>
+      <p class="d-flex flex-wrap align-items-center gap-2">
+        <strong>File:</strong><span id="file"></span>
+        <span class="muted">|</span>
+        <strong>Pages:</strong><span id="count"></span>
+        <span class="muted">|</span>
+        <span class="tag">Range <span id="rangeView"></span></span>
+        <span class="muted">|</span>
+        <a id="openAtLink" target="_blank" rel="noopener" class="link-primary">Open in browser at this page</a>
+      </p>
+
+      <div class="control-row d-flex flex-wrap align-items-center mb-3">
+        <div class="form-check me-2">
+          <input class="form-check-input" type="checkbox" id="useInferred" checked>
+          <label class="form-check-label" for="useInferred">Use inferred main range</label>
+        </div>
+
+        <div class="input-group input-group-sm me-2" style="width:10.5rem;">
+          <span class="input-group-text">Min</span>
+          <input id="minPage" class="form-control form-control-sm" value="1" disabled />
+        </div>
+        <div class="input-group input-group-sm me-2" style="width:10.5rem;">
+          <span class="input-group-text">Max</span>
+          <input id="maxPage" type="number" min="1" step="1" class="form-control form-control-sm" />
+        </div>
+
+        <button id="applyRange" class="btn btn-outline-primary btn-sm">Apply range</button>
+        <button id="resetToInferred" class="btn btn-outline-secondary btn-sm" title="Reset inputs to inferred range">Reset</button>
+        <button id="reroll" class="btn btn-primary btn-sm ms-1">Reroll random page</button>
+        <button id="prev" class="btn btn-outline-dark btn-sm ms-1">Prev</button>
+        <button id="next" class="btn btn-outline-dark btn-sm">Next</button>
+
+        <div class="input-group input-group-sm ms-auto" style="width:12rem;">
+          <span class="input-group-text">Zoom</span>
+          <input id="zoom" type="number" step="0.1" min="0.2" max="3" value="1.0" class="form-control form-control-sm" />
+          <button id="applyZoom" class="btn btn-outline-dark btn-sm">Apply</button>
+        </div>
+
+        <span class="ms-2 text-secondary">Current: <strong>#<span id="currentPage">—</span></strong></span>
+      </div>
+
+      <div class="d-flex flex-wrap gap-2 mb-3">
+        <button id="randomFileBtn" class="btn btn-warning btn-sm btn-icon" title="Pick a random file X.pdf between 1 and N (current N.pdf)">
+          <span>🎲</span><span>Random file (1..N).pdf</span>
+        </button>
+        <button id="copyTextBtn" class="btn btn-success btn-sm btn-icon" title="Copy all text on the current page">
+          <span>📋</span><span>Copy page text</span>
+        </button>
+      </div>
+
+      <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        <div class="form-check">
+          <input class="form-check-input" type="checkbox" id="autoCycleToggle">
+          <label class="form-check-label" for="autoCycleToggle">Auto-cycle random page</label>
+        </div>
+        <div class="input-group input-group-sm" style="width:12rem;">
+          <span class="input-group-text">Every</span>
+          <input id="autoCycleSecs" type="number" min="2" step="1" value="10" class="form-control form-control-sm">
+          <span class="input-group-text">sec</span>
+        </div>
+        <button id="applyAutoCycle" class="btn btn-outline-success btn-sm">Apply</button>
+        <span id="autoCycleStatus" class="text-secondary ms-1">Off</span>
+      </div>
+    </section>
+
+    <div id="canvasWrap">
+      <canvas id="pdfCanvas"></canvas>
+    </div>
+  </main>
+
+  <script type="module">
+    import { getDocument, GlobalWorkerOptions } from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.mjs";
+    GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.mjs";
+
+    const $ = s => document.querySelector(s);
+    const statusEl = $("#status"), metaEl = $("#meta"), fileEl = $("#file"), countEl = $("#count");
+    const currentEl = $("#currentPage"), rangeView = $("#rangeView"), openAtLink = $("#openAtLink");
+    const useInferredChk = $("#useInferred"), minInput = $("#minPage"), maxInput = $("#maxPage");
+    const rerollBtn = $("#reroll"), prevBtn = $("#prev"), nextBtn = $("#next");
+    const applyRangeBtn = $("#applyRange"), resetToInferredBtn = $("#resetToInferred");
+    const zoomInput = $("#zoom"), applyZoomBtn = $("#applyZoom");
+    const canvas = $("#pdfCanvas"), ctx = canvas.getContext("2d");
+    const bgTag = $("#bgTag");
+    const randomFileBtn = $("#randomFileBtn"), copyTextBtn = $("#copyTextBtn");
+    const autoCycleToggle = $("#autoCycleToggle");
+    const autoCycleSecs = $("#autoCycleSecs");
+    const applyAutoCycle = $("#applyAutoCycle");
+    const autoCycleStatus = $("#autoCycleStatus");
+    let autoTimer = null;
+
+    const params = new URLSearchParams(location.search);
+    let rawFile = params.get("fileName");
+
+    function sanitizePdfName(name) {
+      if (!name) return null;
+      const s = decodeURIComponent(name).trim();
+      if (/[\\\/]/.test(s) || /[\x00-\x1F]/.test(s)) return null;
+      if (!/^[A-Za-z0-9._-]+$/i.test(s)) return null;
+      if (!/\.pdf$/i.test(s)) return null;
+      return s;
+    }
+    function fail(msg){ statusEl.className="err"; statusEl.textContent=msg; }
+    function ok(msg){ statusEl.className="ok"; statusEl.textContent=msg; }
+    function randomInt(lo, hi){
+      if (hi < lo) [lo, hi] = [hi, lo];
+      const span = hi - lo + 1, buf = new Uint32Array(1);
+      let x; do { crypto.getRandomValues(buf); x = buf[0] / 2 ** 32; } while (x === 1);
+      return lo + Math.floor(x * span);
+    }
+
+    let pdf=null, total=0, current=1, zoom=1.0, inferred=null;
+    let fileName = sanitizePdfName(rawFile);
+    if (!fileName){ fail("** Missing or invalid ?fileName param. Example: ?fileName=1.pdf **"); throw new Error("Invalid fileName"); }
+    let pdfUrl = new URL("./" + fileName, location.href).toString();
+
+    function setRangeInputs(min, max){
+      min = 1; 
+      minInput.value = "1";
+      maxInput.value = String(max);
+      rangeView.textContent = `1–${max}`;
+    }
+    function getActiveRange(){
+      const def = inferred ?? { min:1, max: total||1 };
+      let max = Number(maxInput.value || def.max);
+      if (!Number.isFinite(max) || max < 1) max = 1;
+      if (total && max > total) max = total;
+      return { min:1, max };
+    }
+
+    async function renderPage(pageNumber){
+      if (!pdf) return;
+      pageNumber = Math.max(1, Math.min(total, pageNumber));
+      current = pageNumber;
+      const page = await pdf.getPage(pageNumber);
+
+      const baseVp = page.getViewport({ scale: 1 });
+      const containerWidth = document.getElementById("canvasWrap").clientWidth;
+      const fitScale = containerWidth / baseVp.width;
+      const finalScale = fitScale * zoom;
+
+      const vp = page.getViewport({ scale: finalScale });
+      canvas.width = Math.floor(vp.width);
+      canvas.height = Math.floor(vp.height);
+      await page.render({ canvasContext: ctx, viewport: vp }).promise;
+
+      currentEl.textContent = String(current);
+      openAtLink.href = `${pdfUrl}#page=${current}`;
+      const u = new URL(location.href);
+      u.searchParams.set("page", String(current));
+      u.searchParams.set("fileName", fileName);
+      history.replaceState({}, "", u.toString());
+    }
+
+    async function loadPdfByFileName(newFileName){
+      const safe = sanitizePdfName(newFileName);
+      if (!safe) throw new Error("Invalid filename");
+      fileName = safe;
+      pdfUrl = new URL("./" + fileName, location.href).toString();
+
+      statusEl.textContent = "Fetching " + fileName + "…";
+      const task = getDocument({ url: pdfUrl });
+      pdf = await task.promise;
+      total = pdf.numPages;
+
+      let labels = null;
+      try { labels = await pdf.getPageLabels(); } catch {}
+      const guessed = labels ? inferMainRangeFromLabels(labels, total) : null;
+      inferred = { min:1, max: guessed?.max ?? total };
+
+      fileEl.textContent = fileName;
+      countEl.textContent = String(total);
+      setRangeInputs(inferred.min, inferred.max);
+      metaEl.hidden = false;
+
+      ok("Loaded successfully.");
+      const start = randomInt(inferred.min, inferred.max);
+      await renderPage(start);
+
+      const u = new URL(location.href);
+      u.searchParams.set("fileName", fileName);
+      history.replaceState({}, "", u.toString());
+    }
+
+    function inferMainRangeFromLabels(labels, total) {
+      if (!Array.isArray(labels) || labels.length !== total) return null;
+      const parseArabic = lab => {
+        const m = String(lab ?? "").match(/(^|[^0-9])([0-9]+)($|[^0-9])/);
+        return m ? Number(m[2]) : null;
+      };
+      let startIdx = -1;
+      for (let i=0;i<total;i++){ if (parseArabic(labels[i]) === 1){ startIdx=i; break; } }
+      if (startIdx === -1) return null;
+      let expected=1, endIdx=startIdx;
+      for (let i=startIdx;i<total;i++){
+        const n = parseArabic(labels[i]);
+        if (n === expected){ endIdx=i; expected++; } else break;
+      }
+      return { min:startIdx+1, max:endIdx+1 };
+    }
+
+    (async () => {
+      try { await loadPdfByFileName(fileName); }
+      catch (err) {
+        console.error(err);
+        fail(String(err?.message || "Error loading PDF"));
+      }
+    })();
+
+    $("#reroll").addEventListener("click", async () => {
+      const { min, max } = getActiveRange();
+      await renderPage(randomInt(min, max));
+    });
+    $("#prev").addEventListener("click", async () => { await renderPage(current - 1); });
+    $("#next").addEventListener("click", async () => { await renderPage(current + 1); });
+
+    $("#applyRange").addEventListener("click", async () => {
+      useInferredChk.checked = false;
+      const { min, max } = getActiveRange(); 
+      setRangeInputs(min, max);
+      await renderPage(randomInt(min, max));
+    });
+
+    $("#resetToInferred").addEventListener("click", async () => {
+      useInferredChk.checked = true;
+      setRangeInputs(inferred.min, inferred.max);
+      await renderPage(randomInt(inferred.min, inferred.max));
+    });
+
+    $("#applyZoom").addEventListener("click", async () => {
+      const z = Number(zoomInput.value);
+      if (Number.isFinite(z) && z >= 0.2 && z <= 3) { zoom = z; await renderPage(current); }
+    });
+
+    addEventListener("resize", (() => {
+      let t; return () => { clearTimeout(t); t=setTimeout(() => { if (pdf) renderPage(current); }, 150); };
+    })());
+
+    function parseNumericStem(name){ const m = /^(\d+)\.pdf$/i.exec(name); return m ? Number(m[1]) : null; }
+    randomFileBtn.addEventListener("click", async () => {
+      try {
+        const n = parseNumericStem(fileName);
+        if (!n || n < 1) { alert("Current file name is not like N.pdf."); return; }
+        const pick = randomInt(1, n);
+        await loadPdfByFileName(`${pick}.pdf`);
+      } catch (e) { console.error(e); fail("Couldn’t load the new random file."); }
+    });
+
+    // ✅ MODIFIED: Copy text + prefix + auto-open ChatGPT
+    async function extractCurrentPageText(){
+      if (!pdf) throw new Error("PDF not loaded");
+      const page = await pdf.getPage(current);
+      const txt = await page.getTextContent();
+      const strings = txt.items?.map(i => ("str" in i ? i.str : "")) || [];
+      return strings.join(" ").replace(/\s+/g, " ").trim();
+    }
+
+    copyTextBtn.addEventListener("click", async () => {
+      const original = copyTextBtn.innerHTML;
+      try {
+        const text = await extractCurrentPageText();
+        const prefixed = `4chan: explain this ${text}`;
+        await navigator.clipboard.writeText(prefixed);
+        window.open(`https://chat.openai.com/?q=${encodeURIComponent(prefixed)}`, "_blank");
+        copyTextBtn.classList.replace("btn-success","btn-outline-success");
+        copyTextBtn.innerHTML = "✅ Copied & Launched!";
+        setTimeout(()=>{ copyTextBtn.classList.replace("btn-outline-success","btn-success"); copyTextBtn.innerHTML = original; }, 2000);
+      } catch (e) {
+        console.error(e);
+        copyTextBtn.classList.replace("btn-success","btn-outline-danger");
+        copyTextBtn.innerHTML = "⚠️ Copy/Launch failed";
+        setTimeout(()=>{ copyTextBtn.classList.replace("btn-outline-danger","btn-success"); copyTextBtn.innerHTML = original; }, 2000);
+      }
+    });
+
+    function stopAutoCycle(){
+      if (autoTimer){ clearInterval(autoTimer); autoTimer = null; }
+      autoCycleToggle.checked = false;
+      autoCycleStatus.textContent = "Off";
+    }
+    function startAutoCycle(secs){
+      stopAutoCycle();
+      autoCycleToggle.checked = true;
+      autoCycleStatus.textContent
