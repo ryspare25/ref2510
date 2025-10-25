@@ -21,6 +21,9 @@
 </head>
 <body>
 <main class="paper">
+  <!-- Topmost display of rawFile -->
+  <div id="fileHeader" class="display-6 mb-3"></div>
+
   <h1 class="mb-3">PDF Random Page Viewer</h1>
   <p class="text-secondary">Use <code>?fileName=1.pdf</code>. Then click “Copy page text” to send it to ChatGPT.</p>
   <div id="status" class="mb-2">Loading…</div>
@@ -41,10 +44,14 @@ const $ = s => document.querySelector(s);
 const statusEl = $("#status"), fileEl = $("#file"), countEl = $("#count"), currentEl = $("#currentPage");
 const copyBtn = $("#copyTextBtn"), rerollBtn = $("#reroll"), clearBtn = $("#clearCache");
 const canvas = $("#pdfCanvas"), ctx = canvas.getContext("2d");
+const headerEl = $("#fileHeader");
 
 let pdf = null, total = 0, current = 1;
 const params = new URLSearchParams(location.search);
 const rawFile = params.get("fileName");
+
+// Set the topmost header to the *raw* fileName param (safe via textContent)
+headerEl.textContent = rawFile ?? "";
 
 function sanitizePdfName(name) {
   if (!name) return null;
