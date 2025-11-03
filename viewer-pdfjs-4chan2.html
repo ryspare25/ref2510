@@ -128,6 +128,7 @@
         <button id="reroll" class="btn btn-small" aria-label="Pick a random page">🎲 Random page</button>
         <button id="copyTextBtn" class="btn btn-accent btn-small">📋 Copy page text + launch ChatGPT</button>
         <div class="spacer"></div>
+        <button id="shareBtn" class="btn btn-outline btn-small" title="Share a link to this exact page" disabled>🔗 Share this page</button>
         <button id="clearCache" class="btn btn-outline btn-small" title="Clear IndexedDB cached chunks">🗑️ Clear cache</button>
       </div>
 
@@ -145,6 +146,7 @@
     const $ = s => document.querySelector(s);
     const statusEl = $("#status"), fileEl = $("#file"), countEl = $("#count"), currentEl = $("#currentPage");
     const copyBtn = $("#copyTextBtn"), rerollBtn = $("#reroll"), clearBtn = $("#clearCache");
+    const shareBtn = $("#shareBtn");
     const canvas = $("#pdfCanvas"), ctx = canvas.getContext("2d");
 
     function hasCrypto(){ return typeof crypto !== 'undefined' && crypto?.getRandomValues; }
@@ -167,12 +169,19 @@
     /* ===== Params ===== */
     const params = new URLSearchParams(location.search);
     const rawFile = params.get("fileName");
+    const rawPageParam = params.get("page");
 
     function sanitizePdfName(name) {
       if (!name) return null;
       const s = decodeURIComponent(name).trim();
       if (!/^[A-Za-z0-9._-]+\.pdf$/i.test(s)) return null;
       return s;
+    }
+
+    function parsePageParam(val){
+      if(!val) return null;
+      const n = parseInt(val, 10);
+      return Number.isFinite(n) && n > 0 ? n : null;
     }
 
     /* ===== IndexedDB (chunk cache) ===== */
@@ -264,21 +273,40 @@
 
     /* ===== PDF load/render ===== */
     let pdf = null, total = 0, current = 1;
+    let currentFileSafe = null;
+
+    function buildShareUrl(page){
+      const u = new URL(location.href);
+      if(currentFileSafe) u.searchParams.set("fileName", currentFileSafe);
+      u.searchParams.set("page", String(page));
+      // Keep URL tidy: remove stray params when not needed
+      return u.href;
+    }
+
+    function syncUrlToPage(page){
+      const href = buildShareUrl(page);
+      history.replaceState(null, "", href);
+    }
 
     async function renderPage(n) {
       if (!pdf) return;
-      const page = await pdf.getPage(n);
+      const clamped = Math.min(Math.max(1, n), total || 1);
+      const page = await pdf.getPage(clamped);
       const vp = page.getViewport({scale:1.5});
       canvas.width = vp.width; canvas.height = vp.height;
       await page.render({canvasContext:ctx, viewport:vp}).promise;
-      current = n;
-      currentEl.textContent = n;
+      current = clamped;
+      currentEl.textContent = clamped;
+      // keep URL in sync & enable share
+      syncUrlToPage(clamped);
+      shareBtn.disabled = false;
     }
 
     async function loadPdf(name) {
       const safe = sanitizePdfName(name);
       if (!safe) { setStatus("Invalid ?fileName parameter.", "err"); throw new Error("invalid name"); }
 
+      currentFileSafe = safe;
       const url = new URL("./" + safe, location.href);
       const cachedBlob = await getCachedChunks(safe);
       let dataBuffer;
@@ -296,7 +324,11 @@
       total = pdf.numPages;
       fileEl.textContent = safe;
       countEl.textContent = total;
-      await renderPage(randomInt(1,total));
+
+      // If URL had ?page=N, honor it; else go random.
+      const desired = parsePageParam(rawPageParam);
+      const initialPage = (desired && desired >= 1 && desired <= total) ? desired : randomInt(1,total);
+      await renderPage(initialPage);
     }
 
     /* ===== Copy page text + open ChatGPT ===== */
@@ -321,6 +353,35 @@
       }catch(e){
         console.error(e);
         setStatus("Copy or ChatGPT launch failed", "err");
+      }
+    });
+
+    /* ===== Share current page ===== */
+    shareBtn.addEventListener("click", async ()=>{
+      const url = buildShareUrl(current);
+      const labelDefault = "🔗 Share this page";
+      shareBtn.disabled = true;
+      try{
+        if(navigator.share){
+          await navigator.share({
+            title: document.title || "PDF Viewer",
+            text: `Page ${current} of ${currentFileSafe || "PDF"}`,
+            url
+          });
+          setStatus("Shared successfully.", "ok");
+        }else{
+          await navigator.clipboard.writeText(url);
+          setStatus("Link copied to clipboard.", "ok");
+          // brief visual confirm
+          const old = shareBtn.textContent;
+          shareBtn.textContent = "✅ Link copied!";
+          setTimeout(()=>{ shareBtn.textContent = old || labelDefault; }, 1600);
+        }
+      }catch(e){
+        console.error(e);
+        setStatus("Share failed.", "err");
+      }finally{
+        shareBtn.disabled = false;
       }
     });
 
