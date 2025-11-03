@@ -1,172 +1,357 @@
-<!DOCTYPE html>
+<!doctype html>
 <html lang="en">
 <head>
-<meta charset="UTF-8">
-<meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>View PDF</title>
-<style>
-/* === Layout === */
-html,body{margin:0;padding:0;height:100%;overflow:hidden;font-family:-apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Oxygen,Ubuntu,Cantarell,"Open Sans","Helvetica Neue",sans-serif;}
-#pdfEmbed{position:absolute;top:0;left:0;width:100%;height:100%;border:none;}
-/* === GitHub-Issues-Dark Portal === */
-#portal{display:none;box-sizing:border-box;padding:1rem;max-width:640px;margin:0 auto;height:100%;overflow-y:auto;background:#0d1117;color:#c9d1d9;}
-#portal h3{margin-top:0;color:#58a6ff;font-size:1.25rem;font-weight:600;}
-#portal p{margin:.4rem 0;font-size:.875rem;}
-#portal button{display:inline-block;margin:.25rem .25rem .5rem 0;padding:.45rem .85rem;font-size:.75rem;font-weight:600;border-radius:6px;border:1px solid #30363d;background:#21262d;color:#c9d1d9;}
-#portal button:hover{background:#30363d;cursor:pointer;}
-#textareaImport{width:100%;box-sizing:border-box;background:#161b22;color:#c9d1d9;border:1px solid #30363d;border-radius:6px;padding:.5rem;font-size:.75rem;}
-@media(max-width:480px){#portal{padding:.75rem;}}
-</style>
-<script>
-/* ========= Helpers ========= */
-const rand = ()=>{const a=new Uint32Array(1);crypto.getRandomValues(a);return a[0]/(0xffffffff+1);};
-/* --- Path helper --------------------------------------------------------- */
-const makeAbs = f => /^(?:https?:|\/)/.test(f) ? f : new URL(f,location.href).href;
-/* ------------------------------------------------------------------------- */
-const getParams = ()=>{const p=new URLSearchParams(window.location.search.replace(/\+$/,''));return{fileName:p.get('fileName')||null,randIdx:p.get('randIdx'),portal:p.has('portal'),sandbox:p.get('indexedDB')||null};};
-const hasPlusMode   = ()=>window.location.search.endsWith('+');
-const hashRandMode  = ()=>window.location.href.endsWith('#');
-const parseRange    = n=>{const m=n? n.match(/-(\d+)-(\d+)\.pdf$/):null;return m?{start:+m[1],end:+m[2]}:{start:1,end:1};};
-/* === Compact timestamp === */
-const encodeTs=ts=>ts.toString(36),decodeTs=s=>typeof s==='number'?s:parseInt(s,36),nowEnc=()=>encodeTs(Date.now());
-/* ========= IndexedDB constants ========= */
-const DB_NAME='viewerRangeDB',DB_VERSION=4,B1='bucket1';  /* bucket2 now virtual */
-/* ========= Sandbox / Live toggle ========= */
-let SANDBOX=false;
-const sandboxData={bucket1:[]};
-/* === IndexedDB open (live only) === */
-function openDB(){return new Promise((res,rej)=>{const r=indexedDB.open(DB_NAME,DB_VERSION);
- r.onupgradeneeded=e=>{const db=e.target.result;if(!db.objectStoreNames.contains(B1)){const s=db.createObjectStore(B1,{keyPath:'id'});s.createIndex('file','file',{unique:false});}};
- r.onsuccess=e=>res(e.target.result);r.onerror=e=>rej(e.target.error);});}
-/* === getAll wrapper (sandbox aware) === */
-async function getAll(store,fileFilter){
- if(SANDBOX){let arr=[...sandboxData[store]];return fileFilter?arr.filter(x=>x.file===fileFilter):arr;}
- const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(store,'readonly');const st=tx.objectStore(store);
- const req=fileFilter?st.index('file').getAll(fileFilter):st.getAll();
- req.onsuccess=e=>res(e.target.result||[]);req.onerror=e=>rej(e.target.error);});}
-/* === updateCard (bucket1 only) === */
-async function updateCard(pageObj,ovr={}){
- const {file,page,start,end}=pageObj;
- const added   = ovr.added   ? encodeTs(typeof ovr.added==='string'?decodeTs(ovr.added):ovr.added) : nowEnc();
- const lastSeen= ovr.lastSeen? encodeTs(typeof ovr.lastSeen==='string'?decodeTs(ovr.lastSeen):ovr.lastSeen) : nowEnc();
- const freqInc = ovr.freqInc||1;
- if(SANDBOX){
-   const arr=sandboxData[B1];const id=file+'|'+page;let card=arr.find(c=>c.id===id);
-   if(card){card.lastSeen=lastSeen;card.frequency=(card.frequency||0)+freqInc;card.added=decodeTs(card.added)<decodeTs(added)?card.added:added;}
-   else arr.push({id,file,page,start,end,added,lastSeen,frequency:freqInc});
-   return;
- }
- const db=await openDB();return new Promise((res,rej)=>{const tx=db.transaction(B1,'readwrite');const st=tx.objectStore(B1);const id=file+'|'+page;const req=st.get(id);
- req.onsuccess=()=>{let c=req.result;
-   if(c){c.lastSeen=lastSeen;c.frequency=(c.frequency||0)+freqInc;c.added=decodeTs(c.added)<decodeTs(added)?c.added:added;}
-   else{c={id,file,page,start,end,added,lastSeen,frequency:freqInc};}
-   st.put(c);
- };
- tx.oncomplete=()=>res();tx.onerror=e=>rej(e.target.error);});}
-/* === neighbor synthesis (virtual bucket2) === */
-function synthNeighbors(b1Arr,fileFilter=null){
- const idSet=new Set(b1Arr.map(c=>c.id)),out=[];
- for(const c of b1Arr){
-   if(fileFilter&&c.file!==fileFilter)continue;
-   const neigh=[c.page-1,c.page+1];
-   for(const p of neigh){
-     if(p<c.start||p>c.end)continue;
-     const id=c.file+'|'+p;
-     if(idSet.has(id))continue;
-     idSet.add(id);
-     out.push({id,file:c.file,page:p,start:c.start,end:c.end,added:c.added,lastSeen:c.lastSeen,frequency:c.frequency});
-   }
- }
- return out;
-}
-/* === visit logic === */
-async function addVisit(file,page,start,end){
- await updateCard({file,page,start,end});
-}
-/* === pick algorithms === */
-const srsPick=cards=>{if(!cards.length)return null;const now=Date.now();let best=null,bestScore=-1e9;
- for(const c of cards){const added=decodeTs(c.added),last=decodeTs(c.lastSeen);const score=(now-(last||added))/((c.frequency)||1);if(score>bestScore){bestScore=score;best=c;}}
- return best;
-};
-async function randomPick(fileFilter){
- const b1=await getAll(B1,fileFilter);
- const b2=synthNeighbors(b1,fileFilter);
- const arr=(rand()<0.67&&b2.length)?b2:(b1.length?b1:b2);
- return arr.length?arr[Math.floor(rand()*arr.length)]:null;
-}
-async function algoPick(fileFilter){
- if(rand()<0.5){const c=srsPick(await getAll(B1,fileFilter));if(c)return c;}
- return randomPick(fileFilter);
-}
-/* === PDF cache === */
-function openPdfCache(){return new Promise((res,rej)=>{const r=indexedDB.open('pdfCache',1);r.onupgradeneeded=e=>e.target.result.createObjectStore('files');r.onsuccess=e=>res(e.target.result);r.onerror=e=>rej(e.target.error);});}
-async function getPdf(file){const db=await openPdfCache();return new Promise((res,rej)=>{const tx=db.transaction('files','readonly');const req=tx.objectStore('files').get(file);req.onsuccess=e=>res(e.target.result||null);req.onerror=e=>rej(e.target.error);});}
-async function putPdf(file,blob){const db=await openPdfCache();return new Promise((res,rej)=>{const tx=db.transaction('files','readwrite');tx.objectStore('files').put(blob,file);tx.oncomplete=()=>res();tx.onerror=e=>rej(e.target.error);});}
-async function pdfUrl(file){let b=await getPdf(file);if(!b){b=await (await fetch(file)).blob();await putPdf(file,b);}return URL.createObjectURL(b);}
-/* === Portal === */
-async function showPortal(){
- const b1=await getAll(B1),b2=synthNeighbors(b1);
- const all=b1.concat(b2);
- const size=new Blob([JSON.stringify({b1})]).size; /* export now only bucket1 */
- const earliest=all.length?new Date(Math.min(...all.map(c=>decodeTs(c.added)))).toLocaleString():'N/A';
- const latest  =all.length?new Date(Math.max(...all.map(c=>decodeTs(c.lastSeen)))).toLocaleString():'N/A';
- const div=document.getElementById('portal');div.style.display='block';
- div.innerHTML=`<h3>Portal</h3><p>Total JSON size: ${size} bytes</p><p>Bucket1: ${b1.length} cards</p><p>Virtual Bucket2: ${b2.length} cards (derived)</p><p>First added: ${earliest}</p><p>Last seen: ${latest}</p><button onclick="exportData()">Export JSON</button><button onclick="importPrompt()">Import JSON</button><button onclick="resetData()">Reset State</button><br/><textarea id="textareaImport" style="display:none" placeholder="Paste JSON here"></textarea>`;
-}
-/* === Export / Import === */
-async function exportData(){
-  const b1=await getAll(B1);
-  const fileArr=[...new Set(b1.map(c=>makeAbs(c.file)))];
-  const idMap=Object.fromEntries(fileArr.map((f,i)=>[f,i]));
-  const slim=a=>a.map(c=>({b:1,f:idMap[c.file],p:c.page,a:c.added,l:c.lastSeen,q:c.frequency,s:c.start,e:c.end}));
-  const json={files:fileArr,cards:[...slim(b1)]};  /* only bucket1 exported */
-  const blob=new Blob([JSON.stringify(json)],{type:'application/json'});
-  const url=URL.createObjectURL(blob);
-  const a=document.createElement('a');a.href=url;a.download='viewerRangeData.json';a.click();URL.revokeObjectURL(url);
-}
-function importPrompt(){
- const area=document.getElementById('textareaImport');area.style.display='block';area.value='';
- const btn=document.createElement('button');btn.textContent='Import';area.after(btn);
- btn.onclick=async()=>{await importData(area.value);location.reload();};
-}
-async function importData(txt){
- txt=txt.trim();if(!txt)return;let j;try{j=JSON.parse(txt);}catch(e){alert('Invalid JSON');return;}
- const {files,cards}=j;if(!Array.isArray(files)||!Array.isArray(cards)){alert('Malformed JSON');return;}
- const ops=[];
- for(const c of cards){
-   if(c.b!==1)continue;  /* ignore any legacy bucket2 data */
-   const f=makeAbs(files[c.f]);if(!f)continue;
-   ops.push(updateCard({file:f,page:c.p,start:c.s,end:c.e},{added:c.a,lastSeen:c.l,freqInc:c.q}));
- }
- await Promise.all(ops);
-}
-const resetData=()=>{if(SANDBOX){sandboxData[B1].length=0;location.reload();return;}const r=indexedDB.deleteDatabase(DB_NAME);r.onsuccess=()=>location.reload();};
-/* === Sandbox Loader === */
-async function loadSandbox(file){SANDBOX=true;const txt=await (await fetch(file)).text();try{await importData(txt);}catch(e){console.error('Sandbox load failed',e);} }
-/* === Main === */
-async function displayPdf(){
- const params=getParams();
- if(params.sandbox){await loadSandbox(params.sandbox);}
- if(params.portal){document.getElementById('pdfEmbed').style.display='none';return showPortal();}
- const plus=hasPlusMode(),hashMode=hashRandMode();
- let file=params.fileName,page;
- if(hashMode&&file){const {start,end}=parseRange(file);page=Math.floor(rand()*(end-start+1))+start;}
- else if(plus||!file){
-   const card=await algoPick(plus?file:null);
-   if(card){file=card.file;page=card.page;}
-   else if(file){page=parseRange(file).start;}
-   else{return document.getElementById('pdfEmbed').remove();}
- }else if(params.randIdx){page=parseInt(params.randIdx,10);}
- else{const {start,end}=parseRange(file);page=Math.floor(rand()*(end-start+1))+start;}
- const {start,end}=parseRange(file);
- if(!hashMode)await addVisit(file,page,start,end);
- const src=await pdfUrl(file);document.getElementById('pdfEmbed').src=`${src}#page=${page}`;
- const newUrl=new URL(window.location.href.replace(/\+$/,''));newUrl.searchParams.set('fileName',file);newUrl.searchParams.set('randIdx',page);history.replaceState(null,'',newUrl);
-}
-</script>
+  <meta charset="utf-8" />
+  <title>PDF Random Page Viewer (Chunked IndexedDB Caching)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <style>
+    :root{
+      --bg:#0b0c10; --fg:#cfd8dc; --muted:#90a4ae; --accent:#7cb342;
+      --btn:#263238; --btn-hover:#37474f; --btn-active:#455a64; --danger:#e53935;
+      --border:#1b2328;
+    }
+    html, body {
+      margin:0; padding:0; background:var(--bg); color:var(--fg);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+      min-height:100svh;
+    }
+    .hidden{display:none!important;}
+    .small{color:var(--muted); font-size:.9rem;}
+    main { margin: 2rem auto; width:min(100%, 980px); }
+
+    /* Card / paper */
+    .paper{
+      background:#11161a; color:var(--fg);
+      border-radius: 18px;
+      box-shadow:0 20px 60px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.05) inset;
+      padding: 1.5rem;
+    }
+
+    /* Toolbar + buttons (consistent with other page) */
+    .toolbar{display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; justify-content:flex-end;}
+    .btn{
+      border:1px solid #111; background:var(--btn); color:var(--fg);
+      padding:.6rem 1rem; border-radius:.5rem; font-size:1rem; cursor:pointer;
+      transition: transform .05s ease, background .15s ease, box-shadow .15s ease;
+      box-shadow:0 2px 0 rgba(0,0,0,.3); user-select:none; text-decoration:none;
+    }
+    .btn:hover{background:var(--btn-hover);}
+    .btn:active{transform:translateY(1px); background:var(--btn-active);}
+    .btn[disabled]{opacity:.5; cursor:not-allowed;}
+    .btn-accent{background:var(--accent); color:#0b0c10; border-color:#5a8e2f;}
+    .btn-danger{background:var(--danger); color:#fff; border-color:#b71c1c;}
+    .btn-ghost{background:transparent;}
+    .btn-small{padding:.45rem .7rem; font-size:.95rem; border-radius:.45rem;}
+    .btn-outline{
+      background:transparent; border-color:var(--border); color:var(--fg);
+    }
+    .btn-outline:hover{background:#0f1519;}
+
+    /* Accessible focus */
+    .btn:focus-visible, a:focus-visible, canvas:focus-visible {
+      outline: 2px solid #9ccc65; outline-offset: 2px;
+    }
+
+    /* Headings & meta */
+    h1{ margin:.25rem 0 .35rem 0; font-weight:750; font-size:1.35rem; }
+    .lead{ margin:.25rem 0 1rem 0; }
+
+    /* Status / pills / code chips */
+    .pill{
+      font-size:.85rem; padding:.2rem .5rem; border-radius:.9rem;
+      background:#1c313a; color:#b2dfdb; border:1px solid rgba(255,255,255,.06);
+      letter-spacing:.2px;
+    }
+    code{background:#0f1519; padding:0 .35rem; border-radius:.3rem; color:#d8e6df;}
+
+    /* Info row */
+    .info{
+      display:flex; gap:.75rem; flex-wrap:wrap; align-items:center;
+      border-top:1px dashed rgba(255,255,255,.08);
+      border-bottom:1px dashed rgba(255,255,255,.08);
+      padding:.6rem 0; margin:.5rem 0 1rem 0;
+    }
+    .info b{ font-weight:700; }
+    .info .sep{ opacity:.5; }
+
+    /* Actions row */
+    .actions{ display:flex; gap:.5rem; align-items:center; flex-wrap:wrap; margin:.5rem 0 1rem 0; }
+    .actions .spacer{ flex:1; }
+
+    /* Canvas frame */
+    .canvas-wrap{
+      background:#0c1114; border:1px solid var(--border);
+      border-radius:10px; padding:.75rem;
+    }
+    #pdfCanvas{
+      width:100%; background:white; border-radius:6px; display:block;
+      box-shadow: 0 1px 0 rgba(255,255,255,.03) inset;
+    }
+
+    /* Reduced motion & high-contrast */
+    @media (prefers-reduced-motion: reduce){
+      .btn{ transition:none; }
+    }
+    @media (prefers-contrast: more){
+      :root{ --muted:#b0bec5; --border:#2a3942; }
+      .btn{ box-shadow:none; border-color:#2a3942; }
+    }
+  </style>
 </head>
-<body onload="displayPdf()">
-<embed id="pdfEmbed" src="" type="application/pdf"/>
-<div id="portal"></div>
+<body>
+  <main>
+    <section class="paper" aria-labelledby="title">
+      <header style="display:flex; align-items:center; justify-content:space-between; gap:.75rem;">
+        <div>
+          <h1 id="title">PDF Random Page Viewer</h1>
+          <p class="lead small">Use <code>?fileName=1.pdf</code>. Then click <code>Copy page text</code> to send it to ChatGPT.</p>
+        </div>
+        <div class="toolbar">
+          <a href="./" class="btn btn-ghost btn-small" aria-label="Reload app">↻ Reload</a>
+        </div>
+      </header>
+
+      <div id="statusWrap" class="small" style="margin:.25rem 0 .5rem 0;">
+        <span id="status" class="pill" aria-live="polite">Loading…</span>
+      </div>
+
+      <div class="info" role="group" aria-label="Document info">
+        <div><b>File:</b> <span id="file" class="small">—</span></div>
+        <span class="sep">|</span>
+        <div><b>Pages:</b> <span id="count" class="small">—</span></div>
+        <span class="sep">|</span>
+        <div><b>Current page:</b> <span id="currentPage" class="small">—</span></div>
+      </div>
+
+      <div class="actions">
+        <button id="reroll" class="btn btn-small" aria-label="Pick a random page">🎲 Random page</button>
+        <button id="copyTextBtn" class="btn btn-accent btn-small">📋 Copy page text + launch ChatGPT</button>
+        <div class="spacer"></div>
+        <button id="clearCache" class="btn btn-outline btn-small" title="Clear IndexedDB cached chunks">🗑️ Clear cache</button>
+      </div>
+
+      <div class="canvas-wrap">
+        <canvas id="pdfCanvas" tabindex="0" aria-label="PDF page canvas"></canvas>
+      </div>
+    </section>
+  </main>
+
+  <script type="module">
+    import { getDocument, GlobalWorkerOptions } from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.mjs";
+    GlobalWorkerOptions.workerSrc = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.mjs";
+
+    /* ===== Utilities (crypto-safe, UI helpers) ===== */
+    const $ = s => document.querySelector(s);
+    const statusEl = $("#status"), fileEl = $("#file"), countEl = $("#count"), currentEl = $("#currentPage");
+    const copyBtn = $("#copyTextBtn"), rerollBtn = $("#reroll"), clearBtn = $("#clearCache");
+    const canvas = $("#pdfCanvas"), ctx = canvas.getContext("2d");
+
+    function hasCrypto(){ return typeof crypto !== 'undefined' && crypto?.getRandomValues; }
+    function secureRandom01(){
+      if(hasCrypto()){ const u = new Uint32Array(1); crypto.getRandomValues(u); return u[0]/0xffffffff; }
+      return Math.random();
+    }
+    function randomInt(min,max){
+      const r = secureRandom01();
+      return min + Math.floor(r * (max - min + 1));
+    }
+
+    function setStatus(msg, kind="info"){
+      statusEl.textContent = msg;
+      if(kind === "ok"){ statusEl.style.background = "#1c313a"; statusEl.style.color = "#b2dfdb"; }
+      else if(kind === "err"){ statusEl.style.background = "rgba(229,57,53,.15)"; statusEl.style.color = "#ffb4af"; }
+      else { statusEl.style.background = "#1c313a"; statusEl.style.color = "#b2dfdb"; }
+    }
+
+    /* ===== Params ===== */
+    const params = new URLSearchParams(location.search);
+    const rawFile = params.get("fileName");
+
+    function sanitizePdfName(name) {
+      if (!name) return null;
+      const s = decodeURIComponent(name).trim();
+      if (!/^[A-Za-z0-9._-]+\.pdf$/i.test(s)) return null;
+      return s;
+    }
+
+    /* ===== IndexedDB (chunk cache) ===== */
+    const DB_NAME = "pdfCacheDB_v2";
+    const STORE_NAME = "pdfs";
+    const CHUNK_SIZE = 1024 * 1024; // 1MB
+
+    let dbPromise;
+    function openDB() {
+      if (dbPromise) return dbPromise;
+      dbPromise = new Promise((resolve, reject) => {
+        const req = indexedDB.open(DB_NAME, 1);
+        req.onupgradeneeded = () => req.result.createObjectStore(STORE_NAME);
+        req.onerror = () => reject(req.error);
+        req.onsuccess = () => resolve(req.result);
+      });
+      return dbPromise;
+    }
+
+    async function clearAllCache() {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        const req = store.clear();
+        tx.oncomplete = () => resolve();
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function fetchChunk(url, start, end) {
+      const headers = { Range: `bytes=${start}-${end-1}` };
+      const resp = await fetch(url, { headers });
+      if (!resp.ok && resp.status !== 206) throw new Error(`Chunk fetch failed: ${resp.status} ${resp.statusText}`);
+      return await resp.arrayBuffer();
+    }
+
+    async function storeChunk(name, start, chunk) {
+      const db = await openDB();
+      return new Promise((resolve, reject) => {
+        const tx = db.transaction(STORE_NAME, "readwrite");
+        const store = tx.objectStore(STORE_NAME);
+        store.put(chunk, `${name}-chunk-${start}`);
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+      });
+    }
+
+    async function getCachedChunks(name) {
+      const db = await openDB();
+      const tx = db.transaction(STORE_NAME, "readonly");
+      const store = tx.objectStore(STORE_NAME);
+      const req = store.getAllKeys();
+
+      return new Promise((resolve, reject) => {
+        req.onsuccess = async () => {
+          const keys = req.result.filter(k => k.startsWith(`${name}-chunk-`));
+          if (keys.length === 0) return resolve(null);
+          keys.sort((a,b)=>parseInt(a.split("-").pop()) - parseInt(b.split("-").pop()));
+
+          const chunkPromises = keys.map(k => new Promise((res, rej) => {
+            const r = store.get(k);
+            r.onsuccess = () => res(r.result);
+            r.onerror = () => rej(r.error);
+          }));
+          const chunks = await Promise.all(chunkPromises);
+          resolve(new Blob(chunks));
+        };
+        req.onerror = () => reject(req.error);
+      });
+    }
+
+    async function loadAndCachePdfChunks(name, url) {
+      const head = await fetch(url, { method: "HEAD" });
+      const size = parseInt(head.headers.get("content-length") || "0");
+      if (!size) throw new Error("Could not get content length");
+
+      const chunks = [];
+      const totalParts = Math.ceil(size/CHUNK_SIZE);
+      for (let start = 0, part=1; start < size; start += CHUNK_SIZE, part++) {
+        const end = Math.min(start + CHUNK_SIZE, size);
+        setStatus(`Fetching chunk ${part}/${totalParts}…`);
+        const chunk = await fetchChunk(url, start, end);
+        await storeChunk(name, start, chunk);
+        chunks.push(chunk);
+      }
+      return new Blob(chunks).arrayBuffer();
+    }
+
+    /* ===== PDF load/render ===== */
+    let pdf = null, total = 0, current = 1;
+
+    async function renderPage(n) {
+      if (!pdf) return;
+      const page = await pdf.getPage(n);
+      const vp = page.getViewport({scale:1.5});
+      canvas.width = vp.width; canvas.height = vp.height;
+      await page.render({canvasContext:ctx, viewport:vp}).promise;
+      current = n;
+      currentEl.textContent = n;
+    }
+
+    async function loadPdf(name) {
+      const safe = sanitizePdfName(name);
+      if (!safe) { setStatus("Invalid ?fileName parameter.", "err"); throw new Error("invalid name"); }
+
+      const url = new URL("./" + safe, location.href);
+      const cachedBlob = await getCachedChunks(safe);
+      let dataBuffer;
+
+      if (cachedBlob) {
+        setStatus("Loaded from cached chunks.", "ok");
+        dataBuffer = await cachedBlob.arrayBuffer();
+      } else {
+        setStatus("Streaming and caching chunks…");
+        dataBuffer = await loadAndCachePdfChunks(safe, url.href);
+      }
+
+      const doc = getDocument({ data: dataBuffer });
+      pdf = await doc.promise;
+      total = pdf.numPages;
+      fileEl.textContent = safe;
+      countEl.textContent = total;
+      await renderPage(randomInt(1,total));
+    }
+
+    /* ===== Copy page text + open ChatGPT ===== */
+    async function extractCurrentPageText(){
+      if(!pdf) throw new Error("PDF not loaded");
+      const page=await pdf.getPage(current);
+      const text=await page.getTextContent();
+      return text.items.map(i=>i.str).join(" ").replace(/\s+/g," ").trim();
+    }
+
+    copyBtn.addEventListener("click", async ()=>{
+      const origHTML = copyBtn.innerHTML;
+      try{
+        const raw=await extractCurrentPageText();
+        const prefixed=`4chan: explain this ${raw}`;
+        await navigator.clipboard.writeText(prefixed);
+        // New ChatGPT app URL
+        window.open(`https://chat.openai.com/?q=${encodeURIComponent(prefixed)}`,"_blank","noopener");
+        copyBtn.classList.remove("btn-accent"); copyBtn.classList.add("btn-outline");
+        copyBtn.innerHTML="✅ Copied & launched!";
+        setTimeout(()=>{ copyBtn.classList.remove("btn-outline"); copyBtn.classList.add("btn-accent"); copyBtn.innerHTML=origHTML; }, 1800);
+      }catch(e){
+        console.error(e);
+        setStatus("Copy or ChatGPT launch failed", "err");
+      }
+    });
+
+    /* ===== Controls ===== */
+    rerollBtn.addEventListener("click", ()=>{
+      if(total>0) renderPage(randomInt(1,total));
+    });
+
+    clearBtn.addEventListener("click", async()=>{
+      if(!confirm("Clear all cached PDF chunks?")) return;
+      await clearAllCache();
+      setStatus("Cache cleared.", "ok");
+    });
+
+    /* ===== Boot ===== */
+    (async()=>{
+      try{
+        if(!rawFile){
+          setStatus("Missing ?fileName param", "err");
+          // Friendly empty state
+          fileEl.textContent = "—";
+          countEl.textContent = "—";
+          currentEl.textContent = "—";
+          return;
+        }
+        await loadPdf(rawFile);
+      }catch(e){
+        console.error(e);
+        setStatus("Failed: "+(e.message||e), "err");
+      }
+    })();
+  </script>
 </body>
 </html>
