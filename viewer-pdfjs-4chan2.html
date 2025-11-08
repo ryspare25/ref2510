@@ -166,9 +166,18 @@
       else { statusEl.style.background = "#1c313a"; statusEl.style.color = "#b2dfdb"; }
     }
 
-    /* ===== Params ===== */
-    const params = new URLSearchParams(location.search);
-    const rawFile = params.get("fileName");
+    /* ===== Params (case-insensitive) ===== */
+    function getParamCI(name, search = location.search) {
+      const params = new URLSearchParams(search);
+      const target = String(name).toLowerCase();
+      for (const [k, v] of params.entries()) {
+        if (k.toLowerCase() === target) return v;
+      }
+      return null;
+    }
+
+    // use case-insensitive lookup for fileName / FILENAME / filename / etc.
+    const rawFile = getParamCI("fileName");
 
     function sanitizePdfName(name) {
       if (!name) return null;
