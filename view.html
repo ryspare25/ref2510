@@ -1,0 +1,171 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>PDF Random Page Viewer (Chunked IndexedDB Caching)</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta http-equiv="Cache-Control" content="no-store" />
+  <style>
+    :root{
+      --bg:#0b0c10; --fg:#cfd8dc; --muted:#90a4ae; --accent:#7cb342;
+      --btn:#263238; --btn-hover:#37474f; --btn-active:#455a64; --danger:#e53935;
+      --border:#1b2328;
+    }
+    html, body {
+      margin:0; padding:0; background:var(--bg); color:var(--fg);
+      font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial;
+      min-height:100svh;
+    }
+    .hidden{display:none!important;}
+    .small{color:var(--muted); font-size:.9rem;}
+    main { margin: 2rem auto; width:min(100%, 980px); }
+    .paper{
+      background:#11161a;
+      border-radius:18px;
+      box-shadow:0 20px 60px rgba(0,0,0,.5);
+      padding:1.5rem;
+    }
+    .toolbar{display:flex; gap:.5rem; justify-content:flex-end;}
+    .btn{
+      border:1px solid #111; background:var(--btn); color:var(--fg);
+      padding:.6rem 1rem; border-radius:.5rem; cursor:pointer;
+    }
+    .btn-accent{background:var(--accent); color:#0b0c10;}
+    .btn-outline{background:transparent; border-color:var(--border);}
+    .btn-small{padding:.45rem .7rem; font-size:.95rem;}
+    h1{margin:.25rem 0;}
+    .pill{padding:.2rem .5rem; border-radius:1rem; background:#1c313a;}
+    .info{display:flex; gap:.75rem; margin:.75rem 0;}
+    .actions{display:flex; gap:.5rem; margin:.75rem 0;}
+    .canvas-wrap{background:#0c1114; border-radius:10px; padding:.75rem;}
+    #pdfCanvas{width:100%; background:#fff; border-radius:6px;}
+  </style>
+</head>
+
+<body>
+<main>
+<section class="paper">
+<header style="display:flex;justify-content:space-between">
+  <div>
+    <h1>PDF Random Page Viewer</h1>
+    <p class="small">Use <code>?fileName=1.pdf&page=5</code></p>
+  </div>
+  <div class="toolbar">
+    <a href="./" class="btn btn-small">↻ Reload</a>
+  </div>
+</header>
+
+<div class="small">
+  <span id="status" class="pill">Loading…</span>
+</div>
+
+<div class="info">
+  <div><b>File:</b> <span id="file">—</span></div>
+  <div><b>Pages:</b> <span id="count">—</span></div>
+  <div><b>Current:</b> <span id="currentPage">—</span></div>
+</div>
+
+<div class="actions">
+  <button id="reroll" class="btn btn-small">🎲 Random</button>
+  <button id="copyTextBtn" class="btn btn-accent btn-small">📋 Copy</button>
+</div>
+
+<div class="canvas-wrap">
+  <canvas id="pdfCanvas"></canvas>
+</div>
+</section>
+</main>
+
+<script type="module">
+import { getDocument, GlobalWorkerOptions }
+from "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.mjs";
+
+GlobalWorkerOptions.workerSrc =
+"https://cdnjs.cloudflare.com/ajax/libs/pdf.js/4.2.67/pdf.worker.mjs";
+
+const $ = s => document.querySelector(s);
+const statusEl = $("#status");
+const fileEl = $("#file");
+const countEl = $("#count");
+const currentEl = $("#currentPage");
+const canvas = $("#pdfCanvas");
+const ctx = canvas.getContext("2d");
+
+const params = new URLSearchParams(location.search);
+const rawFile = params.get("fileName");
+const rawPage = params.get("page");
+
+/* ---------- helpers ---------- */
+function setStatus(msg){ statusEl.textContent = msg; }
+
+function sanitizePdfName(name){
+  if(!name) return null;
+  const s = decodeURIComponent(name).trim();
+  if(!/^[A-Za-z0-9._-]+\.pdf$/i.test(s)) return null;
+  return s;
+}
+
+function normalizePage(p, max){
+  const n = parseInt(p, 10);
+  if (!Number.isFinite(n) || n < 1) return 1;
+  if (n > max) return max;
+  return n;
+}
+
+/* ---------- PDF ---------- */
+let pdf = null;
+let total = 0;
+let current = 1;
+
+async function renderPage(n){
+  const page = await pdf.getPage(n);
+  const vp = page.getViewport({ scale: 1.5 });
+  canvas.width = vp.width;
+  canvas.height = vp.height;
+  await page.render({ canvasContext: ctx, viewport: vp }).promise;
+  current = n;
+  currentEl.textContent = n;
+}
+
+async function loadPdf(){
+  const safe = sanitizePdfName(rawFile);
+  if(!safe){
+    setStatus("Invalid or missing ?fileName");
+    return;
+  }
+
+  setStatus("Loading PDF…");
+  const url = new URL("./" + safe, location.href);
+  pdf = await getDocument(url.href).promise;
+
+  total = pdf.numPages;
+  fileEl.textContent = safe;
+  countEl.textContent = total;
+
+  const startPage = normalizePage(rawPage, total);
+  await renderPage(startPage);
+
+  setStatus("Ready");
+}
+
+/* ---------- controls ---------- */
+$("#reroll").onclick = () => {
+  if(total) renderPage(1 + Math.floor(Math.random() * total));
+};
+
+$("#copyTextBtn").onclick = async () => {
+  const page = await pdf.getPage(current);
+  const txt = await page.getTextContent();
+  const out = txt.items.map(i => i.str).join(" ");
+  await navigator.clipboard.writeText(out);
+  setStatus("Copied");
+};
+
+/* ---------- boot ---------- */
+loadPdf().catch(e=>{
+  console.error(e);
+  setStatus("Load failed");
+});
+</script>
+</body>
+</html>
