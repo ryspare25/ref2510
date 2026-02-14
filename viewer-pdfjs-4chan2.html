@@ -126,6 +126,8 @@
 
       <div class="actions">
         <button id="reroll" class="btn btn-small" aria-label="Pick a random page">🎲 Random page</button>
+        <button id="viewNowBtn" class="btn btn-accent btn-small" title="Copy View Now URL to clipboard">📋 Copy View Link</button>
+        
         <button id="copyTextBtn" class="btn btn-accent btn-small">📋 Copy page text + launch ChatGPT</button>
         <button id="copyAmp2Btn" class="btn btn-accent btn-small">📋 Copy page text (Amp2) + launch ChatGPT</button>
         <div class="spacer"></div>
@@ -147,6 +149,7 @@
     const statusEl = $("#status"), fileEl = $("#file"), countEl = $("#count"), currentEl = $("#currentPage");
     const copyBtn = $("#copyTextBtn"), rerollBtn = $("#reroll"), clearBtn = $("#clearCache");
     const amp2Btn = $("#copyAmp2Btn");
+    const viewNowBtn = $("#viewNowBtn"); 
     const canvas = $("#pdfCanvas"), ctx = canvas.getContext("2d");
 
     function hasCrypto(){ return typeof crypto !== 'undefined' && crypto?.getRandomValues; }
@@ -341,6 +344,31 @@
       }catch(e){
         console.error(e);
         setStatus("Copy or ChatGPT launch failed", "err");
+      }
+    });
+
+    /* ===== View Now Copy Logic ===== */
+    viewNowBtn.addEventListener("click", async () => {
+      if(!rawFile || !current) return;
+      
+      const targetUrl = `https://ryspare25.github.io/ref2510/view-now.html?fileName=${encodeURIComponent(rawFile)}&page=${current}`;
+      const origHTML = viewNowBtn.innerHTML;
+
+      try {
+        await navigator.clipboard.writeText(targetUrl);
+        // Visual feedback
+        viewNowBtn.classList.remove("btn-accent");
+        viewNowBtn.classList.add("btn-outline");
+        viewNowBtn.innerHTML = "✅ URL Copied!";
+        
+        setTimeout(() => {
+          viewNowBtn.classList.remove("btn-outline");
+          viewNowBtn.classList.add("btn-accent");
+          viewNowBtn.innerHTML = origHTML;
+        }, 1500);
+      } catch (err) {
+        console.error("Failed to copy URL:", err);
+        setStatus("Failed to copy URL to clipboard", "err");
       }
     });
 
